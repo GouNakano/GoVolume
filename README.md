@@ -37,6 +37,22 @@
   src/sound_input以下にある４ファイルを同一フォルダに置いて下さい。  
   nsAudioDevice.cppとnsLoopbackAudio.cppをビルドの対象にして下さい。
 
+  ヘッダーファイルは以下の様に読み込みます。
+```C++:test.cpp
+#include "nsLoopbackAudio.h"
+```
+  nsAudioDevice.hは上記コードで自動的に読み込まれるので、  
+  #includeの記述は必要ありません。
+
+  二つのクラスは多態(polymorphism)を用いているので、  
+  クラスの生成時以外は同一のコードで記述出来ます。  
+  
+```C++:test.cpp
+#include "nsLoopbackAudio.h"
+```
+  
+
+
 ## 操作方法
 
 1. ダウンロード  
