@@ -48,10 +48,24 @@
   クラスの生成時以外は同一のコードで記述出来ます。  
   
 ```C++:test.cpp
-#include "nsLoopbackAudio.h"
-```
-  
+nsAudioDevice *pAudio = new nsAudioDevice; //ステレオミキサーを用いる場合
+// nsAudioDevice *pAudio = new nsLoopbackAudio; //ループバック音源を用いる場合。
 
+//初期化
+pAudio->init();
+//データ取得時のイベントハンドラセット
+pAudio->setAudioDataEvent(event); //eventは引数に(nsAudioDevice *Sender,int sample_num,int *lpData[2])を持つ関数ポインタ
+//音声入力終了
+pAudio->startAudioInput(); //音声取り込みを開始して、データがたまるとeventの関数を呼び出して処理させる
+:
+:
+//音声入力終了
+pAudio->end(); //音声取り込みを終了させる
+//インスタンスの破棄
+delete pAudio; 
+
+```
+その他の機能につきましては、ヘッダーファイルの記述を参考にして下さい。  
 
 ## 操作方法
 
