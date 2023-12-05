@@ -62,7 +62,10 @@ nsAudioDevice *pAudio = new nsAudioDevice; //ステレオミキサーを用い�
 //初期化
 pAudio->init();
 //データ取得時のイベントハンドラセット
-pAudio->setAudioDataEvent(event); //eventは引数に(nsAudioDevice *Sender,int sample_num,int *lpData[2])を持つ関数ポインタ
+//eventは引数に(nsAudioDevice *Sender,int sample_num,int *lpData[2])を持つ関数ポインタ
+//lpDataは2ch(左右)の16ビット(整数 -32768～32767)量子化波形情報
+pAudio->setAudioDataEvent(event); 
+
 //音声入力終了
 pAudio->startAudioInput(); //音声取り込みを開始して、データがたまるとeventの関数を呼び出して処理させる
 :
