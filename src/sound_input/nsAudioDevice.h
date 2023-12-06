@@ -168,12 +168,12 @@ private:
 	WAVEHDR      wh[BLOCK_NUMS];
 	//音声入力のコールバック処理の可否
 	bool isInputSound;
+	//音声入力の終了フラグ
+	bool isEndInputSound;
 	//音声データ処理イベントタイマー
 	TTimer *DrawTimer;
 	//取得した音声データの更新フラグ
 	bool isAudioUpdate;
-	//コールバックロック
-	std::mutex callback_mtx_;
 protected:
 	//共通
 	typSoundSource soundSourceType;

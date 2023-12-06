@@ -22,8 +22,6 @@ nsAudioDevice::nsAudioDevice()
 	isAudioUpdate = false;
 	//音声データ取得イベントハンドラーの関数ポインタ
 	FAudioDataEvent = nullptr;
-	//音声入力のコールバック処理の可否
-	isInputSound = false;
 }
 //----------------------------------------------------------
 //デストラクタ
@@ -74,6 +72,10 @@ bool nsAudioDevice::init()
 	DrawTimer->Enabled  = false;
 	DrawTimer->Interval = INTERVAL/4;
 	DrawTimer->OnTimer  = AudioDataEventTimer;
+	//音声入力のコールバック処理の可否
+	isInputSound = false;
+	//音声入力の終了フラグ
+	isEndInputSound = false;
 
 	return true;
 }
@@ -94,8 +96,6 @@ void __fastcall nsAudioDevice::AudioDataEventTimer(TObject *Sender)
 	//音声データの処理呼び出し
 	try
 	{
-		//ロックする
-		std::lock_guard<std::mutex> lock(callback_mtx_);
 		//データが更新されているか
 		if(isAudioUpdate == false)
 		{
@@ -127,27 +127,41 @@ void __fastcall nsAudioDevice::AudioDataEventTimer(TObject *Sender)
 //----------------------------------------------------------
 bool nsAudioDevice::end()
 {
-	//音声入力のコールバック処理の可否
+	//音声入力処理を止める
 	isInputSound = false;
 	//音声データ処理イベントタイマー終了
 	DrawTimer->Enabled = false;
 	DrawTimer->OnTimer = nullptr;
-	//ロック解放待ち
-	std::lock_guard<std::mutex> lock(callback_mtx_);
-	//音声データ処理イベントタイマー削除
-	delete DrawTimer;
-	DrawTimer = nullptr;
-	// waveIn 終了
-	waveInStop(hWIn);
-	for(int cnt=0; cnt< BLOCK_NUMS; cnt++)
+
+	try
 	{
-		wh[cnt].lpData = nullptr;
-		waveInUnprepareHeader(hWIn,&wh[cnt], sizeof(WAVEHDR));
+		//音声入力処理を止める
+		isEndInputSound = true;
+		for(int Cnt = 0;Cnt < 16;Cnt++)
+		{
+			if(isEndInputSound == false)
+			{
+				break;
+			}
+			Sleep(10);
+			Application->ProcessMessages();
+		}
+		// waveIn 終了
+		waveInStop(hWIn);
+		for(int cnt=0; cnt< BLOCK_NUMS; cnt++)
+		{
+			wh[cnt].lpData = nullptr;
+			waveInUnprepareHeader(hWIn,&wh[cnt], sizeof(WAVEHDR));
+		}
+		//音声入力を閉じる
+		waveInReset(hWIn);
+		waveInClose(hWIn);
+		hWIn = nullptr;
 	}
-	//音声入力を閉じる
-	waveInReset(hWIn);
-	waveInClose(hWIn);
-	hWIn = nullptr;
+	catch(Exception& e)
+	{
+		return false;
+	}
 
 	return true;
 }
@@ -239,13 +253,21 @@ void CALLBACK nsAudioDevice::waveInProc(HWAVEIN hwi,UINT uMsg,DWORD_PTR dwInstan
 {
 	//コールバック元オブジェクトを得る
 	nsAudioDevice *pAudioDevice = reinterpret_cast<nsAudioDevice *>(dwInstance);
-	//最終コールバック内ポイント通過時間更新
-	pAudioDevice->last_thread_time = GetTickCount();
+	//音声入力タイマー内部処理終了フラグチェック
+	if(pAudioDevice->isEndInputSound == true)
+	{
+		//終了
+		pAudioDevice->isEndInputSound = false;
+		pAudioDevice->isInputSound    = false;
+		return;
+	}
 	//音声入力のコールバック処理の可否
 	if(pAudioDevice->isInputSound == false)
 	{
 		return;
 	}
+	//最終コールバック内ポイント通過時間更新
+	pAudioDevice->last_thread_time = GetTickCount();
 
 	switch(uMsg)
 	{
@@ -262,39 +284,44 @@ void CALLBACK nsAudioDevice::waveInProc(HWAVEIN hwi,UINT uMsg,DWORD_PTR dwInstan
 		case WIM_DATA:
 		{
 			int call_idx;
-			//ロックする
-			std::lock_guard<std::mutex> lock(pAudioDevice->callback_mtx_);
 
-			//コールバックした波形オーディオ バッファー
-			WAVEHDR *whdr = (WAVEHDR *)dwParam1;
-			//波形オーディオ バッファーのインデックスを得る
-			if(whdr->lpData == (char *)pAudioDevice->lpWave[0])
+			try
 			{
-				call_idx = 0;
-			}
-			else
-			{
-				call_idx = 1;
-			}
-			//音声データ処理
-			if((pAudioDevice->wh[call_idx].dwFlags & WHDR_DONE) == WHDR_DONE)
-			{
-				//音声データのオブジェクト作成
-				pAudioDevice->unit.set(pAudioDevice->wh[call_idx].lpData,pAudioDevice->wh[call_idx].dwBytesRecorded);
-
-				//録音中ならバッファに保存
-				if(pAudioDevice->IsRecording == true)
+				//コールバックした波形オーディオ バッファー
+				WAVEHDR *whdr = (WAVEHDR *)dwParam1;
+				//波形オーディオ バッファーのインデックスを得る
+				if(whdr->lpData == (char *)pAudioDevice->lpWave[0])
 				{
-					pAudioDevice->g_data.push_back(pAudioDevice->unit);
+					call_idx = 0;
 				}
-				//ステレオモノラル変換してバッファにセット
-				pAudioDevice->sendUnit.NowActiveBufferSize = pAudioDevice->SetMonoBufferFromStereo(pAudioDevice->sendUnit.lpWork,(short *)(pAudioDevice->unit.ptr()),pAudioDevice->unit.size());
-				//録音継続
-				pAudioDevice->ContinueRecord(pAudioDevice->wh[call_idx]);
-				//取得した音声データの更新フラグON
-				pAudioDevice->isAudioUpdate = true;
-			}
+				else
+				{
+					call_idx = 1;
+				}
+				//音声データ処理
+				if((pAudioDevice->wh[call_idx].dwFlags & WHDR_DONE) == WHDR_DONE)
+				{
+					//音声データのオブジェクト作成
+					pAudioDevice->unit.set(pAudioDevice->wh[call_idx].lpData,pAudioDevice->wh[call_idx].dwBytesRecorded);
 
+					//録音中ならバッファに保存
+					if(pAudioDevice->IsRecording == true)
+					{
+						pAudioDevice->g_data.push_back(pAudioDevice->unit);
+					}
+					//ステレオモノラル変換してバッファにセット
+					pAudioDevice->sendUnit.NowActiveBufferSize = pAudioDevice->SetMonoBufferFromStereo(pAudioDevice->sendUnit.lpWork,(short *)(pAudioDevice->unit.ptr()),pAudioDevice->unit.size());
+					//録音継続
+					pAudioDevice->ContinueRecord(pAudioDevice->wh[call_idx]);
+					//取得した音声データの更新フラグON
+					pAudioDevice->isAudioUpdate = true;
+				}
+			}
+			catch(Exception& e)
+			{
+				pAudioDevice->isInputSound = false;
+				return;
+			}
 			break;
 		}
 		default:
