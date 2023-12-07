@@ -163,31 +163,38 @@ bool nsLoopbackAudio::startAudioInput()
 //-----------------------------------
 bool nsLoopbackAudio::release()
 {
-	//リソースを確保した順番の逆順で解放する
-	if(soundInputTimer != nullptr)
+	try
 	{
-		delete soundInputTimer;
-		soundInputTimer = nullptr;
+		//リソースを確保した順番の逆順で解放する
+		if(soundInputTimer != nullptr)
+		{
+			delete soundInputTimer;
+			soundInputTimer = nullptr;
+		}
+		if(capture_client != nullptr)
+		{
+			capture_client->Release();
+			capture_client = nullptr;
+		}
+		if(audio_client != nullptr)
+		{
+			audio_client->Release();
+			audio_client = nullptr;
+		}
+		if(device != nullptr)
+		{
+			device->Release();
+			device = nullptr;
+		}
+		if(enumerator != nullptr)
+		{
+			enumerator->Release();
+			enumerator = nullptr;
+		}
 	}
-	if(capture_client != nullptr)
+	catch(Exception& e)
 	{
-		capture_client->Release();
-		capture_client = nullptr;
-	}
-	if(audio_client != nullptr)
-	{
-		audio_client->Release();
-		audio_client = nullptr;
-	}
-	if(device != nullptr)
-	{
-		device->Release();
-		device = nullptr;
-	}
-	if(enumerator != nullptr)
-	{
-		enumerator->Release();
-		enumerator = nullptr;
+		return false;
 	}
 	return true;
 }
@@ -230,7 +237,10 @@ bool nsLoopbackAudio::end()
 			isAudioClientActive = false;
 		}
 		//リソース解放
-		release();
+		if(release() == false)
+		{
+			return false;
+		}
 	}
 	catch(Exception& e)
 	{
@@ -403,6 +413,7 @@ void __fastcall nsLoopbackAudio::SoundInputEventTimer(TObject *Sender)
 				{
 					if(packet0 > 4)
 					{
+						//0で埋める
 						sum_wave_data.resize(intervalSampleNumber);
 						std::fill(sum_wave_data.begin(),sum_wave_data.end(),0);
 						hr = capture_client->ReleaseBuffer(0);
@@ -411,12 +422,13 @@ void __fastcall nsLoopbackAudio::SoundInputEventTimer(TObject *Sender)
 							isSoundInputTimerError = true;
 							return;
 						}
-						//音声入力タイマーのエラーフラグON
-						isSoundInputTimerError = true;
+						//音声入力タイマーのエラーフラグOFF
+						isSoundInputTimerError = false;
 						break;
 					}
 					packet0++;
-					Sleep(1);
+					Sleep(10);
+					Application->ProcessMessages();
 					continue;
 				}
 
