@@ -124,6 +124,8 @@ bool nsLoopbackAudio::init()
 	soundInputTimer->Enabled  = false;
 	soundInputTimer->Interval = INTERVAL/2;
 	soundInputTimer->OnTimer  = SoundInputEventTimer;
+	// クリティカルセクション初期化
+	InitializeCriticalSection(&critical_section);
 
 	return true;
 }
@@ -191,6 +193,7 @@ bool nsLoopbackAudio::release()
 			enumerator->Release();
 			enumerator = nullptr;
 		}
+        DeleteCriticalSection(&critical_section);
 	}
 	catch(Exception& e)
 	{
@@ -366,6 +369,7 @@ void __fastcall nsLoopbackAudio::SoundInputEventTimer(TObject *Sender)
 	short              sval;
 	float             *wave_float;
 	short             *wave_short;
+	bool               IsNoCorrelation;
 
 	//音声入力タイマーを止める
 	soundInputTimer->Enabled = false;
@@ -373,6 +377,7 @@ void __fastcall nsLoopbackAudio::SoundInputEventTimer(TObject *Sender)
 	if(isEndsoundInputTimer == true)
 	{
 		//音声入力タイマーで処理しない
+		isEndsoundInputTimer = false;
 		return;
 	}
 	//パケット処理
@@ -386,10 +391,10 @@ void __fastcall nsLoopbackAudio::SoundInputEventTimer(TObject *Sender)
 			Sleep(10);
 			//合計したwave_data初期化
 			sum_wave_data.clear();
-			//パケットサイズ0の回数
-			int packet0 = 0;
+			//相関関係なしのフラグ
+			IsNoCorrelation = false;
 			//必要なサンプル数を得るまでループ
-			while(sum_wave_data.size() < intervalSampleNumber)
+			while(sum_wave_data.size() < intervalSampleNumber && IsNoCorrelation == false)
 			{
 				//音声入力タイマー内部処理終了フラグチェック
 				if(isEndsoundInputTimer == true)
@@ -399,168 +404,153 @@ void __fastcall nsLoopbackAudio::SoundInputEventTimer(TObject *Sender)
 					isSoundInputTimerError = false;
 					return;
 				}
-				//パケットに残りがある分だけループ
-				hr = capture_client->GetNextPacketSize(&packetLength);
-				//音声入力エラーチェック
-				if(FAILED(hr))
+
+				//バッファを得る
+				fragment             = nullptr;
+				num_frames_available = 0;
+				flags                = 0;
+				hr = capture_client->GetBuffer(&fragment,&num_frames_available,&flags,nullptr,nullptr);
+				if(hr != S_OK)
+				{
+					//録音スレッドのエラーフラグON
+					isSoundInputTimerError = true;
+				}
+				EnterCriticalSection(&critical_section);
+				//パケットサイズを得る
+				int packet_size = (sizeof(BYTE) * wf.Format.wBitsPerSample * num_frames_available * num_channels)/8;
+				//パケットが無音かチェックする
+				if((flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0)
+				{
+					//無音なのでゼロで埋める
+					memset(fragment,0,packet_size);
+				}
+				//パケット内のデータは、前のパケットのデバイス位置と相関してないかチェック
+				else if((flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0)
+				{
+					//相関してないのでこのパケットで処理を抜ける
+					IsNoCorrelation = true;
+					//0で埋める
+					if(num_frames_available == 0)
+					{
+						sum_wave_data.resize(intervalSampleNumber);
+						std::fill(sum_wave_data.begin(),sum_wave_data.end(),0);
+					}
+				}
+				else if(num_frames_available == 0)
+				{
+					sum_wave_data.resize(intervalSampleNumber);
+					std::fill(sum_wave_data.begin(),sum_wave_data.end(),0);
+				}
+				//waveデータの確保
+				if(wave_data.size() != num_frames_available*num_channels)
+				{
+					wave_data.resize(num_frames_available*num_channels);
+				}
+
+				//ビット数による場合分け
+				if(wf.Format.wBitsPerSample == 32)
+				{
+					//floatのwaveデータのアドレスを得る
+					wave_float = reinterpret_cast<float *>(fragment);
+					//floatのwaveデータをshortに変換する
+					for(int cnt = 0;cnt < num_frames_available*num_channels;cnt++)
+					{
+						//サンプルビットによる切り替え
+						if(wf.Format.wBitsPerSample == 32)
+						{
+							try
+							{
+								//32ビットfloatから変換して16ビットの範囲(16ビット量子化)でセット
+								dval = wave_float[cnt];
+								dval *= 32768.0;
+								sval  = static_cast<short>(dval);
+								//リストの作成
+								wave_data[cnt] = sval;
+							}
+							catch(Exception& e)
+							{
+								if(cnt > 0)
+								{
+									wave_data[cnt] = wave_data[cnt-1];
+								}
+								else
+								{
+									wave_data[cnt] = 0;
+								}
+							}
+						}
+					}
+				}
+				else if(wf.Format.wBitsPerSample == 16)
+				{
+					//shortのwaveデータのアドレスを得る
+					wave_short = reinterpret_cast<short *>(fragment);
+					//waveデータセットする
+					for(int cnt = 0;cnt < num_frames_available*2;cnt++)
+					{
+						//16ビットshort
+						sval = wave_short[cnt];
+
+						wave_data[cnt] = sval;
+					}
+				}
+				else
 				{
 					//音声入力タイマーのエラーフラグON
 					isSoundInputTimerError = true;
 					return;
 				}
-				//パケットサイズが0なら0で埋めて取り込み完了とする
+				LeaveCriticalSection(&critical_section);
+				//ウェーブ情報のシーケンスコンテナ連結
+				sum_wave_data.insert(sum_wave_data.end(),wave_data.begin(),wave_data.end());
+				//ReleaseBuffer メソッドはバッファーを解放します。
+				hr = capture_client->ReleaseBuffer(num_frames_available);
+				if(FAILED(hr))
+				{
+					isSoundInputTimerError = true;
+					return;
+				}
+				//パケットに残りがある分だけループ
+				hr = capture_client->GetNextPacketSize(&packetLength);
 				if(packetLength == 0)
 				{
-					if(packet0 > 4)
-					{
-						//0で埋める
-						sum_wave_data.resize(intervalSampleNumber);
-						std::fill(sum_wave_data.begin(),sum_wave_data.end(),0);
-						hr = capture_client->ReleaseBuffer(0);
-						if(FAILED(hr))
-						{
-							isSoundInputTimerError = true;
-							return;
-						}
-						//音声入力タイマーのエラーフラグOFF
-						isSoundInputTimerError = false;
-						break;
-					}
-					packet0++;
-					Sleep(10);
-					Application->ProcessMessages();
-					continue;
-				}
-
-				//パケットでループ
-				while(packetLength > 0)
-				{
-					//パケットサイズ0の回数リセット
-					packet0 = 0;
-					//バッファを得る
-					fragment             = nullptr;
-					num_frames_available = 0;
-					flags                = 0;
-					hr = capture_client->GetBuffer(&fragment,&num_frames_available,&flags,nullptr,nullptr);
-					if(FAILED(hr))
-					{
-						//録音スレッドのエラーフラグON
-						isSoundInputTimerError = true;
-						return;
-					}
-					//パケットサイズを得る
-					int packet_size = (sizeof(BYTE) * wf.Format.wBitsPerSample * num_frames_available * num_channels)/8;
-					//パケットが無音かチェックする
-					if((flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0)
-					{
-						//無音なのでゼロで埋める
-						memset(fragment,0,packet_size);
-					}
-					//パケット内のデータは、前のパケットのデバイス位置と相関してないかチェック
-					else if((flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0)
-					{
-						//バッファ解放
-						hr = capture_client->ReleaseBuffer(num_frames_available);
-						continue;
-					}
-					//waveデータの確保
-					if(wave_data.size() != num_frames_available*num_channels)
-					{
-						wave_data.resize(num_frames_available*num_channels);
-					}
-
-					//ビット数による場合分け
-					if(wf.Format.wBitsPerSample == 32)
-					{
-						//floatのwaveデータのアドレスを得る
-						wave_float = reinterpret_cast<float *>(fragment);
-						//floatのwaveデータをshortに変換する
-						for(int cnt = 0;cnt < num_frames_available*num_channels;cnt++)
-						{
-							//サンプルビットによる切り替え
-							if(wf.Format.wBitsPerSample == 32)
-							{
-								try
-								{
-									//32ビットfloatから変換して16ビットの範囲(16ビット量子化)でセット
-									dval = wave_float[cnt];
-									dval *= 32768.0;
-									sval  = static_cast<short>(dval);
-									//リストの作成
-									wave_data[cnt] = sval;
-								}
-								catch(Exception& e)
-								{
-									if(cnt > 0)
-									{
-										wave_data[cnt] = wave_data[cnt-1];
-									}
-									else
-									{
-										wave_data[cnt] = 0;
-									}
-								}
-							}
-						}
-					}
-					else if(wf.Format.wBitsPerSample == 16)
-					{
-						//shortのwaveデータのアドレスを得る
-						wave_short = reinterpret_cast<short *>(fragment);
-						//waveデータセットする
-						for(int cnt = 0;cnt < num_frames_available*2;cnt++)
-						{
-							//16ビットshort
-							sval = wave_short[cnt];
-
-							wave_data[cnt] = sval;
-						}
-					}
-					else
-					{
-						//音声入力タイマーのエラーフラグON
-						isSoundInputTimerError = true;
-						return;
-					}
-					//ウェーブ情報のシーケンスコンテナ連結
-					sum_wave_data.insert(sum_wave_data.end(),wave_data.begin(),wave_data.end());
-					//ReleaseBuffer メソッドはバッファーを解放します。
-					hr = capture_client->ReleaseBuffer(num_frames_available);
-					if(FAILED(hr))
-					{
-						isSoundInputTimerError = true;
-						return;
-					}
-					//パケットに残りがある分だけループ
-					capture_client->GetNextPacketSize(&packetLength);
+					break;
 				}
 			}
-			//タイミング調整
-			DWORD et = GetTickCount();
-			DWORD rt = et - last_thread_time;
-			if(rt < INTERVAL)
+			//データの有無チェック
+			if(sum_wave_data.size() > 0)
 			{
-				DWORD tm = INTERVAL - rt;
-				Sleep(tm);
-			}
-			//音声データのオブジェクト作成
-			unit.set((char *)sum_wave_data.data(),sizeof(short)*sum_wave_data.size());
-			//録音中ならバッファに保存
-			if(IsRecording == true)
-			{
-				g_data.push_back(unit);
-			}
-			//ステレオモノラル変換してバッファにセット
-			sendUnit.NowActiveBufferSize = SetMonoBufferFromStereo(sendUnit.lpWork,(short *)(unit.ptr()),unit.size());
-			//音声データ取得イベントハンドラー呼び出し
-			if(FAudioDataEvent != nullptr)
-			{
-				int sample_num;
-				int *lpData[2];
-				//取得データを得る
-				if(getAudioData(&sample_num,lpData) == true)
+				//タイミング調整
+				DWORD et = GetTickCount();
+				DWORD rt = et - last_thread_time;
+				if(rt < INTERVAL)
 				{
-					FAudioDataEvent(this,sample_num,lpData);
+					long long inter = (INTERVAL * (sum_wave_data.size()/2)) / intervalSampleNumber;
+
+					if(inter >= 0 && inter <= INTERVAL)
+					{
+						Sleep(INTERVAL - inter);
+					}
+				}
+				//音声データのオブジェクト作成
+				unit.set((char *)sum_wave_data.data(),sizeof(short)*sum_wave_data.size());
+				//録音中ならバッファに保存
+				if(IsRecording == true)
+				{
+					g_data.push_back(unit);
+				}
+				//ステレオモノラル変換してバッファにセット
+				sendUnit.NowActiveBufferSize = SetMonoBufferFromStereo(sendUnit.lpWork,(short *)(unit.ptr()),unit.size());
+				//音声データ取得イベントハンドラー呼び出し
+				if(FAudioDataEvent != nullptr)
+				{
+					int sample_num;
+					int *lpData[2];
+					//取得データを得る
+					if(getAudioData(&sample_num,lpData) == true)
+					{
+						FAudioDataEvent(this,sample_num,lpData);
+					}
 				}
 			}
 			//最終スレッド内ポイント通過時間

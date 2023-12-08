@@ -38,6 +38,9 @@ private:
 	TTimer *soundInputTimer;
 	//音声入力タイマー内部処理終了フラグ
 	bool isEndsoundInputTimer;
+
+	CRITICAL_SECTION   critical_section;
+
 private:
 	//リソース解放
 	bool release();
