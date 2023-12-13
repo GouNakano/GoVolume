@@ -98,6 +98,14 @@ delete pAudio;
 
    <http://www.sakura-densan.com/govolume/index.htm>
 
+## GoVoumeをご利用になりたい方
+
+1. ダウンロード
+   ダウンロードは本リポジトリから行うのでは無く、  
+   正式版をベクターのサイトの下記URLからダウンロードして下さい。
+
+   <https://www.vector.co.jp/soft/winnt/art/se478044.html>  
+
 ## ループバック音源について(Version 0.48の新機能 2023/12)  
 
   ループバック音源は、PCから発する音をそのまま受け取ります。
